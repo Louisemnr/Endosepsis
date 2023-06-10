@@ -1,0 +1,1006 @@
+---
+title: "Endosepsis"
+author: "Louise MAUNIER"
+date: "2023-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+0) Loading of libraries
+1) Data import
+2) Preparation of transcript metadata (gencode.v25.annotation.gtf)
+3) Creation of a count table
+4) Remove pseudogenes
+5) Filtering to remove lowly expressed genes
+6) Convert counts to DGEList object
+7) Quality control
+8) Normalisation for composition biais
+9) Fully supervised analysis
+10) Fully unsupervised analysis : principal component analysis (PCA) 
+11) Fully unsupervised analysis : hierarchical clustering with heatmaps
+12) Semi supervised analysis : gene level differential expression analysis with edgeR
+
+## 0) Loading of libraries
+```{r}
+# Remove environment variables 
+rm(list = ls())
+# List of packages to install and load
+liste_packages <- c("edgeR", "limma", "Glimma", "gplots", "RColorBrewer", "rtracklayer", "genefilter", "biomaRt", "dplyr", "ggplot2", "OptimalCutpoints", "reshape2", "ggrepel", "factoextra")
+
+# Install and load each package in the list
+for (nom_package in liste_packages) {
+  if (!require(nom_package, character.only = TRUE)) {
+    install.packages(nom_package)
+  }
+  library(nom_package, character.only = TRUE)
+}
+```
+
+
+## 1) Data import
+
+```{r}
+# Read the sample information into R
+sampleinfo_endosepsis <- read.delim("data/sampleinfo_endosepsis.txt", stringsAsFactors = FALSE)
+head(sampleinfo_endosepsis)
+```
+
+```{r}
+# Read the data into R
+seqdata_endosepsis <- read.delim("data/EndosepsisData.txt", stringsAsFactors = FALSE)
+head(seqdata_endosepsis)
+```
+
+```{r}
+#Convert GeneIDs to gene names 
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+genes <- seqdata_endosepsis$GeneID
+symbol <- getBM(filters = "ensembl_gene_id",
+                attributes = c("ensembl_gene_id","hgnc_symbol"),
+                values = genes, 
+                mart = mart)
+seqdata_endosepsis <- merge(x = symbol, 
+            y = seqdata_endosepsis, 
+            by.x="ensembl_gene_id",
+            by.y="GeneID")
+
+```
+```{r}
+head(seqdata_endosepsis)
+```
+
+```{r}
+#Remove duplicate from gene_id
+seqdata_endosepsis <- distinct(seqdata_endosepsis, ensembl_gene_id, .keep_all = TRUE)
+
+```
+
+```{r}
+# Remove first column from seqdata_endosepsis
+countdata_endosepsis <- seqdata_endosepsis[,-(1)]
+
+# Store GeneID as rownames
+rownames(countdata_endosepsis) <- seqdata_endosepsis[,1]
+```
+
+
+```{r}
+head(countdata_endosepsis)
+```
+
+```{r}
+colnames(countdata_endosepsis)
+```
+```{r}
+# Rename the column of countdata_endosepsis
+substr("ThisIsAString", start=4, stop=7)
+# using substr, you extract the characters starting at position 4 and stopping at position 7 of the colnames
+colnames(countdata_endosepsis) <- substr(colnames(countdata_endosepsis), 4, 7)
+colnames(countdata_endosepsis)
+```
+
+```{r}
+head(countdata_endosepsis)
+```
+
+```{r}
+# Verify the Sample names between the 2 datasets
+table(colnames(subset(countdata_endosepsis, select = -1)) == sampleinfo_endosepsis$SampleName)
+```
+
+
+## 2) Preparation of transcript metadata (gencode.v25.annotation.gtf)
+
+```{r}
+# Import gencode files with gene types 
+mygtf <-  as.data.frame(import("data/gencode.v25.annotation.gtf")) # gencode was downloaded from https://www.gencodegenes.org/human/release_25.html GTF file of Comprehensive gene annotation CHR
+```
+
+
+```{r}
+# Remove the duplicates
+dupl <- duplicated(mygtf$gene_id)
+table(dupl) # 58037 FALSE, 2521780 TRUE
+mygtf <-  mygtf[ !dupl, ]
+```
+```{r}
+# Creation of a dataframe with the genes names
+attributeData <- mygtf[, c("seqnames", "type" , "gene_id", "gene_type", "gene_status", "gene_name", "level", "tag", "source")]
+head(attributeData)
+```
+
+## 3) Creation of a count table
+
+# TRANSCRIPT METADATA
+
+```{r}
+# Create a new dataframe with the gene ids for the rownames
+rownames(attributeData) = attributeData$gene_id
+head(attributeData)
+```
+```{r}
+dim(attributeData)
+```
+
+
+```{r}
+# We select only the gene type "protein_coding"
+attributeData <- attributeData[ which(attributeData$gene_type == "protein_coding"),]
+table(attributeData$gene_type) # 19950 protein_coding
+```
+
+```{r}
+dim(attributeData)
+```
+
+
+```{r}
+# We verify our new dataframe attributeData
+head(attributeData)
+```
+
+```{r}
+# Check the unique values in the gene_type column
+unique(attributeData$gene_type)
+```
+
+
+```{r}
+# Search for duplicates of the GeneID from our dataframe countdata_endosepsis
+current_names <- rownames(attributeData)
+new_names <- sub("^(.{15}).*", "\\1", current_names)
+new_names[duplicated(new_names)] # 18 duplicates
+```
+
+```{r}
+# Search informations about these 18 duplicates 
+attributeData[which(grepl("ENSG00000182378", rownames(attributeData))), ]
+#Do the same with all the duplicates
+```
+
+
+```{r}
+# Remove the 18 duplicates = "PAR" tag
+attributeData <- subset(attributeData, !(rownames(attributeData) %in% c("ENSG00000182378.13_PAR_Y", "ENSG00000178605.13_PAR_Y", "ENSG00000167393.17_PAR_Y", "ENSG00000185960.13_PAR_Y", "ENSG00000205755.11_PAR_Y", "ENSG00000198223.16_PAR_Y", "ENSG00000185291.11_PAR_Y", "ENSG00000169100.13_PAR_Y", "ENSG00000169093.15_PAR_Y", "ENSG00000182162.10_PAR_Y", "ENSG00000197976.11_PAR_Y", "ENSG00000196433.12_PAR_Y", "ENSG00000169084.13_PAR_Y", "ENSG00000214717.10_PAR_Y", "ENSG00000002586.18_PAR_Y", "ENSG00000168939.11_PAR_Y", "ENSG00000124333.15_PAR_Y", "ENSG00000124334.17_PAR_Y")))
+table(attributeData$tag) # no "PAR" tag 
+table(attributeData$gene_type) # 19932 genes "protein_coding"
+```
+```{r}
+# Verify that there are no more duplicates of the GeneID from our dataframe countdata_endosepsis
+current_names <- rownames(attributeData)
+new_names <- sub("^(.{15}).*", "\\1", current_names)
+new_names[duplicated(new_names)] #no duplicate
+```
+
+```{r}
+# Rename the rownames with the same rowname types than our dataframe countdata_endosepsis
+rownames(attributeData) <- new_names
+head(attributeData)
+```
+```{r}
+# We keep the intersection of the lines between attributeData and countdata_endosepsis to have the same genes
+intersect_rows <- intersect(rownames(attributeData), rownames(countdata_endosepsis))
+
+# We select only the lines corresponding to the intersection
+attributeData <- attributeData[intersect_rows, ]
+countdata_endosepsis <- countdata_endosepsis[intersect_rows, ]
+head(countdata_endosepsis) # 19432 genes
+```
+```{r,echo=FALSE}
+# Another way of merging dataframes : use merge() function
+# merge_countdata <- merge(attributeData,countdata_endosepsis,by="row.names")
+# dim(merge_countdata)
+# head(merge_countdata)
+```
+
+
+```{r}
+# We verify that the rownames are identical
+identical(rownames(attributeData), rownames(countdata_endosepsis))
+```
+
+
+## 4) Remove pseudogenes
+
+```{r}
+# We check which gene types do we still have and on which chromosomes
+table(attributeData$gene_type) # 19432 genes "protein_coding"
+table(attributeData$seqnames) # 828 chrX ; 44 chrY ; 13 chrM 
+```
+```{r,echo=FALSE}
+# We have already selected the gene type protein_coding, now we remove the genes on chromosome X, chromosome Y and chromosome M
+# attributeData <- attributeData[which(attributeData$seqnames !="chrX" & attributeData$seqnames !="chrY" & attributeData$seqnames !="chrM") ,]
+# table(attributeData$seqnames) # 0 chrX ; 0 chrY ; 0 chrM
+# dim(attributeData) # 18547 genes
+```
+```{r}
+# We have already selected the gene type protein_coding, now we remove the genes on chromosome X, chromosome Y and chromosome M
+attributeData <- attributeData %>% filter(!seqnames %in% levels(factor(c("chrX", "chrY", "chrM"))))
+dim(attributeData)
+```
+
+
+```{r}
+# We create a new dataframe with our genes of interest (protein coding on autosome chromosomes)
+countdata <- countdata_endosepsis[ rownames(attributeData), ]
+identical(rownames(countdata), rownames(attributeData))
+```
+```{r}
+dim(countdata)
+```
+
+
+```{r}
+# We check our new dataframe countdata
+head(countdata)
+```
+
+
+## 5) Filtering to remove lowly expressed genes
+
+# PCA on counts per million (CPM) date
+
+
+```{r}
+# Obtain CPMs for our data :
+myCPM <- cpm(countdata [,-1])
+head(myCPM)
+```
+
+```{r}
+# Which values in myCPM_endosepsis are greater than 1 ? We take cpm > 1 becouse 1 cpm <=> 10-15 counts for each samples
+thresh <- myCPM > 1
+# This produces a logical matrix with TRUEs and FALSEs : 
+head(thresh)
+```
+```{r}
+# Summary of how many TRUEs there are in each row = how many genes have expressed more than 1 cpm for each samples
+table(rowSums(thresh)) # There are 9591 genes that have TRUEs in all 40 samples
+```
+```{r}
+# Let's have a look and see whether our threshold of 1 does indeed correspond to a count of about 10-15
+# We will look at the first sample : 
+plot(myCPM[,1],countdata[,2])
+```
+
+```{r}
+# Let us limit the x and y-axis so we can actually look to see what is happening at the smaller counts : 
+plot(myCPM[,1],countdata[,2],ylim=c(0,50),xlim=c(0,3))
+# Add a vertical line at 0.5 CPM and horizontal line at 10 in blue color : 
+abline(v=1,h=10, col="BLUE")
+```
+```{r}
+# we would like to keep genes that have at least 3 TRUES in each row of thresh <=> we keep all genes that have > 10 counts in at least 3 samples
+keep <- rowSums(thresh) >= 3
+head(keep)
+```
+
+```{r}
+# Subset the rows of countdata to keep the more highly expressed genes : 
+countdata <- countdata[keep,] 
+head(countdata)
+```
+```{r}
+dim(countdata) # 12792 genes with cpm > 1 (counts > 10) in at least 3 samples
+```
+```{r}
+# Check that there are no duplicates
+length(unique(row.names(countdata)))
+```
+
+
+## 6) Convert counts to DGEList object
+
+```{r}
+# Our data convert to DGEList object
+dgeObj <- DGEList(countdata[,-1])
+```
+
+```{r}
+# Library size information is stored in the samples slot
+head(dgeObj$samples)
+```
+
+
+## 7) Quality control
+
+```{r}
+# Barplot with the sample names on the x-axis and the axis names rotated (las=2)
+png("res/plot_lib_sizes.png", width = 1200,height = 600, res=120)
+plot_lib_sizes <- barplot(dgeObj$samples$lib.size, names=colnames(dgeObj), las=2)
+
+# Add a title to the plot
+title("Barplot of library sizes")
+dev.off()
+```
+```{r}
+# Normalisation of library size : get log2 counts per million
+logcounts <- cpm(dgeObj,log=TRUE)
+
+# Save the Boxplots of logCPMs
+png("res/plot_lib_sizes_logcpm.png", width = 1200, height = 600, res=120)
+
+# Check distributions of samples using boxplots
+plot_lib_sizes_logcpm <- boxplot(logcounts, xlab="", ylab="Log2 counts per million",las=2)
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+title("Boxplots of logCPMs (unnormalised)") 
+
+dev.off()
+```
+
+## 8) Normalisation for composition biais
+
+```{r}
+# Apply normalisation to DGEList object
+dgeObj<- calcNormFactors(dgeObj) #update of the normalisation factors in the DGEList object (their default values are 1)
+dgeObj$samples
+```
+
+```{r}
+# SO37 has the smallest normalisation factor (0.6670296) and S030 has the highest normalisation factor (1.3790804)
+# We will first compare the logcounts which have not been normalized for composition bias 
+par(mfrow=c(1,2))
+plotMD(logcounts,column = 35) #S037
+abline(h=0,col="grey")
+
+plotMD(logcounts,column = 28) #S030
+abline(h=0,col="grey")
+```
+```{r}
+# Then we will compare the dgeObj which have been normalized for composition bias 
+par(mfrow=c(1,2))
+plotMD(dgeObj,column = 35)
+abline(h=0,col="grey")
+
+plotMD(dgeObj,column = 28)
+abline(h=0,col="grey")
+```
+
+## 9) Fully supervised analysis
+
+```{r}
+# Selection of the genes of interest in sepsis
+genes_interest <- c("ENSG00000019582", "ENSG00000168329", "ENSG00000110680", "ENSG00000169245", "ENSG00000136634", "ENSG00000136244") # Gene ID for the following genes : 'CX3CR1', 'CD74', 'CXCL10', 'IL10', 'IL6', 'CALCA'
+result <- dgeObj$counts[rownames(dgeObj$counts) %in% genes_interest, ]
+
+# create a dataframe to analyse differential expression for each gene
+result <- t(result)
+data_rows <- result[-1, ]
+
+# specify the clinical group for each sample
+data_merged <- merge(data_rows, sampleinfo_endosepsis[, c("SampleName", "ClinicalGroup")], by.x = 0, by.y = "SampleName", all.x = TRUE)
+rownames(data_merged) <- data_merged[,1]
+data_merged <- data_merged[,-(1)]
+head(data_merged) # No PCT or IP10 gene because filtered due to low expression
+
+```
+
+# Differential expression of CD74 
+
+# Creation of a boxplot for CD74 : expression of CD74 according to clinical group
+
+```{r}
+# Create a dataframe with only the expression of CD74 = ENSG00000019582
+data_CD74 <- data_merged[, c("ENSG00000019582", "ClinicalGroup")]
+data_CD74$ENSG00000019582 <- as.numeric(data_CD74$ENSG00000019582)
+
+boxplot_CD74 <- ggplot(data_CD74) + geom_boxplot(aes(x = ClinicalGroup, y = log10(data_CD74$ENSG00000019582), fill = ClinicalGroup), outlier.colour = NA) + geom_jitter(aes(x = ClinicalGroup, y = log10(data_CD74$ENSG00000019582)), width = 0.2, height = 0, size = 0.5) + theme_bw() + labs(x = "Clinical group", y = "CD74 expression", title = "CD74 expression", fill = "Clinical Group") + scale_x_discrete(labels = c("Sepsis", "No sepsis")) + theme(legend.position ="none")
+boxplot_CD74
+ggsave("res_fully/boxplot_CD74.png", plot=boxplot_CD74, width = 5,height = 4, dpi=300)
+```
+
+
+# CD74 : Distribution evaluation : normal distribution? 
+
+```{r}
+# Create an histogramme to see if the distribution is normal 
+hist(data_CD74$ENSG00000019582, breaks = "FD", col = "lightblue", main = "Histogramme CD74") # Normal distribution
+```
+```{r}
+# Confirm the normal distribution with Shapiro-Wilk normality test
+shapiro.test(data_CD74$ENSG00000019582) # Shapiro-Wilk normality test p-value = 0.9323 = normal distribution
+```
+
+
+# CD74 : differential expression between Sepsis or NoSepsis ? T-test because normal distribution
+
+```{r}
+# Extraction of gene expression values for each group 
+sepsis_expression_CD74 <- subset(data_CD74, ClinicalGroup == "Sepsis")$ENSG00000019582
+nosepsis_expression_CD74 <- subset(data_CD74, ClinicalGroup == "NoSepsis")$ENSG00000019582
+
+# T-test for differential expression
+t_test_result_CD74 <- t.test(sepsis_expression_CD74, nosepsis_expression_CD74)
+t_test_result_CD74$statistic # t value CD74 = -0.3552878 = CD74 lowly expressed in group groupe Sepsis / NoSepsis
+t_test_result_CD74$p.value  # p value CD74 = 0.7252308 = NOT Significant
+```
+
+
+# CD74 : differential expression between Sepsis or NoSepsis with Wilcoxon test
+
+```{r}
+wilcox_test_result_CD74 <- wilcox.test(sepsis_expression_CD74, nosepsis_expression_CD74)
+wilcox_test_result_CD74$statistic # W value CD74 = 148
+wilcox_test_result_CD74$p.value  # p value CD74 = 0.5462329 = NOT Significant
+```
+
+
+# CD74: ROC curve
+
+```{r}
+#Create a new dataframe with level 1 for Sepsis and level 0 for NoSepsis
+data_CD74_roccurve <- data_CD74
+data_CD74_roccurve$ClinicalGroup <- ifelse(data_CD74_roccurve$ClinicalGroup == "Sepsis", 1, 0)
+head(data_CD74_roccurve)
+```
+
+```{r}
+# Find the optimal cutpoints in a ROC analysis
+data_CD74_roccurve.cutpoint <- optimal.cutpoints(X = "ENSG00000019582", status = "ClinicalGroup", tag.healthy = 0, methods = "Youden", data = data_CD74_roccurve, ci.fit = TRUE, conf.level = 0.95)
+ 
+summary(data_CD74_roccurve.cutpoint, ) # AUC = 0.438 : poor performance ; equivalent to random classification
+```
+
+
+```{r}
+# Curve ROC for CD74
+plot(data_CD74_roccurve.cutpoint)
+```
+
+# Differential expression of CXCR1
+
+# Creation for a boxplot for CXCR1 : expression of CXCR1 according to clinical group
+
+```{r}
+# Create a dataframe with only the expression of CXCR1 = ENSG00000168329
+data_CXCR1 <- data_merged[, c("ENSG00000168329", "ClinicalGroup")]
+data_CXCR1$ENSG00000168329 <- as.numeric(data_CXCR1$ENSG00000168329)
+
+boxplot_CXCR1 <- ggplot(data_CXCR1) + geom_boxplot(aes(x = ClinicalGroup, y = log10(data_CXCR1$ENSG00000168329), fill = ClinicalGroup), outlier.colour = NA) + geom_jitter(aes(x = ClinicalGroup, y = log10(data_CXCR1$ENSG00000168329)), width = 0.2, height = 0, size = 0.5) + theme_bw() + labs(x = "Clinical group", y = "CXCR1 expression", title = "CXCR1 expression", fill = "Clinical Group") + scale_x_discrete(labels = c("Sepsis", "No sepsis")) + theme(legend.position ="none")
+boxplot_CXCR1
+
+# Save the boxplot_CXCR1
+ggsave("res_fully/boxplot_CXCR1.png", plot=boxplot_CXCR1, width = 5,height = 4, dpi=300)
+```
+
+# CXCR1 : Distribution evaluation : normal distribution? 
+
+```{r}
+# Create an histogramme to see if the distribution is normal 
+hist(data_CXCR1$ENSG00000168329, breaks = "FD", col = "lightblue", main = "Histogramme CXCR1") # Normal distribution?
+```
+
+```{r}
+# Confirm the normal distribution with Shapiro-Wilk normality test
+shapiro.test(data_CXCR1$ENSG00000168329) # Shapiro-Wilk normality test p-value = 0.08751 = normal distribution
+```
+
+# CXCR1 : differential expression between Sepsis or NoSepsis with T-test because normal distribution
+
+```{r}
+sepsis_expression_CXCR1 <- subset(data_CXCR1, ClinicalGroup == "Sepsis")$ENSG00000168329
+nosepsis_expression_CXCR1 <- subset(data_CXCR1, ClinicalGroup == "NoSepsis")$ENSG00000168329
+
+t_test_result_CXCR1 <- t.test(sepsis_expression_CXCR1, nosepsis_expression_CXCR1)
+t_test_result_CXCR1$statistic # t value CXCR1 = -0.6412124 = CXCR1 lowly expressed in Sepsis group than NoSepsis
+t_test_result_CXCR1$p.value  # p value CXCR1 = 0.5294736 = NOT Significant
+```
+
+
+
+# CXCR1 : try Wilcoxon test 
+
+```{r}
+wilcox_test_result_CXCR1 <- wilcox.test(sepsis_expression_CXCR1, nosepsis_expression_CXCR1)
+wilcox_test_result_CXCR1$statistic # W value CXCR1 = 152
+wilcox_test_result_CXCR1$p.value  # p value CXCR1 = 0.6230051 : NON Significatif
+```
+
+# CXCR1 : ROC curve
+
+```{r}
+#Create a new dataframe with level 1 for Sepsis and level 0 for NoSepsis
+data_CXCR1_roccurve <- data_CXCR1
+data_CXCR1_roccurve$ClinicalGroup <- ifelse(data_CXCR1_roccurve$ClinicalGroup == "Sepsis", 1, 0)
+head(data_CXCR1_roccurve)
+```
+
+```{r}
+# Find the optimal cutpoints in a ROC analysis
+data_CXCR1_roccurve.cutpoint <- optimal.cutpoints(X = "ENSG00000168329", status = "ClinicalGroup", tag.healthy = 0, methods = "Youden", data = data_CXCR1_roccurve, ci.fit = TRUE, conf.level = 0.95)
+
+summary(data_CXCR1_roccurve.cutpoint, ) # AUC = 0.45 : poor performance ; equivalent to random classification
+```
+
+
+```{r}
+# Curve ROC for CXCR1
+plot(data_CXCR1_roccurve.cutpoint)
+```
+
+
+# Differential expression of IL10 
+
+# Creation of a boxplot for IL10 : expression of IL10 according to clinical group
+
+```{r}
+# Create a dataframe with only the expression of IL10 = ENSG00000136634
+data_IL10 <- data_merged[, c("ENSG00000136634", "ClinicalGroup")]
+data_IL10$ENSG00000136634 <- as.numeric(data_IL10$ENSG00000136634)
+
+boxplot_IL10 <- ggplot(data_IL10) + geom_boxplot(aes(x = ClinicalGroup, y = log10(data_IL10$ENSG00000136634), fill = ClinicalGroup), outlier.colour = NA) + geom_jitter(aes(x = ClinicalGroup, y = log10(data_IL10$ENSG00000136634)), width = 0.2, height = 0, size = 0.5) + theme_bw() + labs(x = "Clinical group", y = "IL10 expression", title = "IL10 expression", fill = "Clinical Group") + scale_x_discrete(labels = c("Sepsis", "No sepsis")) + theme(legend.position ="none")
+boxplot_IL10
+
+# Save the boxplot_IL10
+ggsave("res_fully/boxplot_IL10.png", plot=boxplot_IL10, width = 5,height = 4, dpi=300)
+```
+
+# IL10 : Distribution evaluation : normal distribution? 
+
+```{r}
+# Create an histogramme to see if the distribution is normal 
+hist(data_IL10$ENSG00000136634, breaks = "FD", col = "lightblue", main = "Histogramme IL10") # NOT normal distribution
+```
+```{r}
+# Confirm the normal distribution with Shapiro-Wilk normality test
+shapiro.test(data_IL10$ENSG00000136634) # Shapiro-Wilk normality test p-value = 1.026e-09 = NOT normal distribution
+```
+
+
+# IL10 : differential expression between Sepsis or NoSepsis with Wilcoxon test because NOT normal distribution
+
+```{r}
+# Extraction of gene expression values for each group 
+sepsis_expression_IL10 <- subset(data_IL10, ClinicalGroup == "Sepsis")$ENSG00000136634
+nosepsis_expression_IL10 <- subset(data_IL10, ClinicalGroup == "NoSepsis")$ENSG00000136634
+
+wilcox_test_result_IL10 <- wilcox.test(sepsis_expression_IL10, nosepsis_expression_IL10)
+wilcox_test_result_IL10$statistic # W value IL10 = 216.5 
+wilcox_test_result_IL10$p.value  # p value IL10 = 0.1462365 : NOT significant
+```
+
+# IL10 : ROC curve
+
+```{r}
+#Create a new dataframe with level 1 for Sepsis and level 0 for NoSepsis
+data_IL10_roccurve <- data_IL10
+data_IL10_roccurve$ClinicalGroup <- ifelse(data_IL10_roccurve$ClinicalGroup == "Sepsis", 1, 0)
+head(data_IL10_roccurve)
+```
+
+```{r}
+# Find the optimal cutpoints in a ROC analysis
+data_IL10_roccurve.cutpoint <- optimal.cutpoints(X = "ENSG00000136634", status = "ClinicalGroup", tag.healthy = 0, methods = "Youden", data = data_IL10_roccurve, ci.fit = TRUE, conf.level = 0.95)
+ 
+summary(data_IL10_roccurve.cutpoint, ) # AUC = 0.641 : poor performance 
+```
+
+
+```{r}
+# Curve ROC for IL10
+plot(data_IL10_roccurve.cutpoint)
+```
+
+
+# Differential expression of IL6 
+
+# Creation of a boxplot for IL6 : expression of IL6 according to clinical group
+
+```{r}
+# Create a dataframe with only the expression of IL6 = ENSG00000136244
+data_IL6 <- data_merged[, c("ENSG00000136244", "ClinicalGroup")]
+data_IL6$ENSG00000136244 <- as.numeric(data_IL6$ENSG00000136244)
+
+boxplot_IL6 <- ggplot(data_IL6) + geom_boxplot(aes(x = ClinicalGroup, y = log10(data_IL6$ENSG00000136244), fill = ClinicalGroup), outlier.colour = NA) + geom_jitter(aes(x = ClinicalGroup, y = log10(data_IL6$ENSG00000136244)), width = 0.2, height = 0, size = 0.5) + theme_bw() + labs(x = "Clinical group", y = "IL6 expression", title = "IL6 expression", fill = "Clinical Group") + scale_x_discrete(labels = c("Sepsis", "No sepsis")) + theme(legend.position ="none")
+boxplot_IL6
+
+# Save the boxplot_IL6
+ggsave("res_fully/boxplot_IL6.png", plot=boxplot_IL6, width = 5,height = 4, dpi=300)
+```
+
+# IL6 : Distribution evaluation : normal distribution? 
+
+```{r}
+# Create an histogramme to see if the distribution is normal 
+hist(data_IL6$ENSG00000136244, breaks = "FD", col = "lightblue", main = "Histogramme IL6") # NOT normal distribution
+```
+```{r}
+# Confirm the normal distribution with Shapiro-Wilk normality test
+shapiro.test(data_IL6$ENSG00000136244) # Shapiro-Wilk normality test p-value = 9.433e-12 = NOT normal distribution
+```
+
+
+# IL6 : differential expression between Sepsis or NoSepsis with Wilcoxon test because NOT normal distribution
+
+```{r}
+# Extraction of gene expression values for each group 
+sepsis_expression_IL6 <- subset(data_IL6, ClinicalGroup == "Sepsis")$ENSG00000136244
+nosepsis_expression_IL6 <- subset(data_IL6, ClinicalGroup == "NoSepsis")$ENSG00000136244
+
+wilcox_test_result_IL6 <- wilcox.test(sepsis_expression_IL6, nosepsis_expression_IL6)
+wilcox_test_result_IL6$statistic # W value IL6 = 195
+wilcox_test_result_IL6$p.value  # p value IL6 = 0.4232505 : NOT Significant
+```
+
+# IL6 : ROC curve 
+
+```{r}
+#Create a new dataframe with level 1 for Sepsis and level 0 for NoSepsis
+data_IL6_roccurve <- data_IL6
+data_IL6_roccurve$ClinicalGroup <- ifelse(data_IL6_roccurve$ClinicalGroup == "Sepsis", 1, 0)
+head(data_IL6_roccurve)
+```
+
+```{r}
+# Find the optimal cutpoints in a ROC analysis
+data_IL6_roccurve.cutpoint <- optimal.cutpoints(X = "ENSG00000136244", status = "ClinicalGroup", tag.healthy = 0, methods = "Youden", data = data_IL6_roccurve, ci.fit = TRUE, conf.level = 0.95)
+ 
+summary(data_IL6_roccurve.cutpoint, ) # AUC = 0.577 : poor performance 
+```
+
+
+```{r}
+# Curve ROC for IL6
+plot(data_IL6_roccurve.cutpoint)
+```
+
+## 10) Fully unsupervised analysis : principal component analysis (PCA)
+
+```{r}
+# Transpose the dataframe normalized counts to have the samples as rows and genes as column 
+dgeObj_transp <- t(dgeObj$counts)
+dim(dgeObj_transp)
+```
+```{r}
+# See the summary of de PCA on dgeObj$counts
+pca <- prcomp(dgeObj_transp)
+summary(pca)
+```
+
+```{r}
+# Create a dataframe for the PCA analysis with the data normalized for composition biais
+pca_df <- as.data.frame(pca$x)
+head(pca_df)
+```
+
+```{r}
+# Obtain the standard deviations of each principal component
+sdev <- pca$sdev
+
+# Calculate the proportion of variance explained by each principal component
+variance_exp <- (sdev^2) / sum(sdev^2)
+head(variance_exp)
+```
+
+```{r}
+# Display the proportion of variance explained by each principal component
+prop_variance <- round(variance_exp * 100, 2)
+prop_variance # PC1 = 70,07% et PC2 = 6,43% ; PC3 = 4,12% ; PC4 = 3,33%
+```
+
+```{r}
+# Create columns in pca_df with the sample names and the clinical group
+pca_df$SampleName <- rownames(pca_df)
+pca_df$group <- sampleinfo_endosepsis$ClinicalGroup
+head(pca_df)
+```
+```{r}
+# Create a dataframe with the first and second principal components
+pca_PC1_PC2 <- pca_df %>% select(PC1, PC2, SampleName, group)
+head(pca_PC1_PC2)
+```
+
+```{r}
+# Create the PCA plot with PC1 and PC2
+PCA_plot <- ggplot(pca_PC1_PC2, aes(PC1, PC2, label = SampleName, colour = group)) +
+  geom_text() +
+  labs(x = "PC1 70,07%", y = "PC2 6,43%") +
+  ggtitle("PCA Plot")
+
+ggsave("res/PCA_plot.png", plot=PCA_plot, width = 8,height = 6, dpi=300)
+```
+
+
+```{r}
+# Create a dataframe with the second and third principal components
+pca_PC2_PC3 <- pca_df %>% select(PC2, PC3, SampleName, group)
+head(pca_PC2_PC3)
+```
+```{r}
+# Create the PCA plot with PC1 and PC2
+PCA_plot_2_3 <- ggplot(pca_PC2_PC3, aes(PC2, PC3, label = SampleName, colour = group)) +
+  geom_text() +
+  labs(x = "PC2 6,43%%", y = "PC3 4,12%") +
+  ggtitle("PCA Plot PC2_3")
+
+ggsave("res/PCA_plot_2_3.png", plot=PCA_plot_2_3, width = 8,height = 6, dpi=300)
+```
+
+
+```{r}
+# Create a dataframe with the first and third principal components
+pca_PC1_PC3 <- pca_df %>% select(PC1, PC3, SampleName, group)
+head(pca_PC1_PC3)
+```
+
+```{r}
+# Create the PCA plot with PC1 and PC3
+PCA_plot_1_3 <- ggplot(pca_PC1_PC3, aes(PC1, PC3, label = SampleName, colour = group)) +
+  geom_text() +
+  labs(x = "PC1 70,07%", y = "PC3 4,12%") +
+  ggtitle("PCA Plot PC1_3")
+
+ggsave("res/PCA_plot_1_3.png", plot=PCA_plot_1_3, width = 8,height = 6, dpi=300)
+```
+
+
+```{r}
+# Create the PCA plot with ellipses
+PCA_plot_ellipses <- fviz_pca_ind(pca, 
+             habillage=sampleinfo_endosepsis$ClinicalGroup,
+             addEllipses=TRUE)
+
+ggsave("res/PCA_plot_ellipses.png", plot=PCA_plot_ellipses, width = 8,height = 6, dpi=300)
+```
+
+
+
+## 11) Fully unsupervised analysis : hierarchical clustering with heatmaps 
+
+```{r}
+# We change the rownames of the dataframe dgeObj$counts to have a heatmap with gene names instead of gene ID 
+rownames(dgeObj$counts) <- countdata$c_sy
+head(dgeObj$counts)
+```
+```{r}
+# We estimate the variance for each row in the dgeObj$counts matrix
+var_genes <- apply(dgeObj$counts, 1, var)
+head(var_genes)
+```
+
+```{r}
+# Get the gene names for the top 200 most variable genes
+select_var <- names(sort(var_genes, decreasing=TRUE))[1:200]
+head(select_var)
+```
+
+
+```{r}
+# Subset dgeObj$counts matrix
+highly_variable_genes <- dgeObj$counts[select_var,]
+dim(highly_variable_genes)
+head(highly_variable_genes)
+```
+
+```{r}
+# Let's set up colour schemes for ClinicalGroup
+# How many clinical groups and in what order are they stored?
+class(sampleinfo_endosepsis$ClinicalGroup)
+as.factor(sampleinfo_endosepsis$ClinicalGroup)
+sampleinfo_endosepsis$ClinicalGroup = as.factor(sampleinfo_endosepsis$ClinicalGroup)
+levels(sampleinfo_endosepsis$ClinicalGroup)
+```
+```{r}
+## Let's choose purple for NoSepsis and orange for Sepsis
+col.clinicalgroup <- c("purple","orange")[sampleinfo_endosepsis$ClinicalGroup]
+head(data.frame(sampleinfo_endosepsis$ClinicalGroup,col.clinicalgroup))
+```
+
+```{r}
+## Get some nicer colours
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+# Set up colour vector for Clinical group variable
+col.clinicalgroup <- c("purple","orange")[sampleinfo_endosepsis$ClinicalGroup]
+```
+
+```{r}
+# Plot the heatmap with Top 200 variable genes
+png("res/heatmap_Top200.png", width = 1800,height = 1200, res=200)
+
+heatmap.2(highly_variable_genes, 
+         col=rev(morecols(50)),
+         trace="column", 
+         main="Top 200 most variable genes across samples",
+         ColSideColors=col.clinicalgroup,scale="row")
+dev.off()
+```
+
+
+
+```{r}
+# Get the gene names for the top 100 most variable genes
+select_var_100 <- names(sort(var_genes, decreasing=TRUE))[1:100]
+head(select_var_100)
+```
+
+
+```{r}
+# Subset dgeObj$counts matrix with the top 100 most variable genes
+highly_variable_genes_100 <- dgeObj$counts[select_var_100,]
+dim(highly_variable_genes_100)
+head(highly_variable_genes_100)
+```
+
+```{r}
+# Plot the heatmap with Top 100 variable genes
+png("res/heatmap_Top100.png", width = 1800,height = 1200, res=200)
+
+heatmap.2(highly_variable_genes_100, 
+         col=rev(morecols(50)),
+         trace="column", 
+         main="Top 100 most variable genes across samples",
+         ColSideColors=col.clinicalgroup,scale="row")
+dev.off()
+```
+
+
+## 12) Semi supervised analysis : gene level differential expression analysis with edgeR
+
+# Create the design matrix 
+
+```{r}
+# Combine the values of the "ClinicalGroup" into a single string for each observation.
+group <- paste(sampleinfo_endosepsis$ClinicalGroup)
+# Converts this string into a factor to have a categorical variable
+group <- factor(group)
+```
+
+
+```{r}
+# Specify a design matrix with the clinical group
+design <- model.matrix(~ group)
+design
+```
+
+
+# Data exploration
+
+```{r}
+#plotMDS(dgeObj, labels=group, cex=0.75, xlim=c(-3, 3), col=col.clinicalgroup)
+```
+# Estimating the dispersion
+
+```{r}
+# Common dispersion estimation : quantify the variability of gene expression data between samples
+dgeObj <- estimateCommonDisp(dgeObj)
+
+# Trended dispersion estimation : taking account of systematic changes in dispersion as a function of the level of expression
+dgeObj <- estimateGLMTrendedDisp(dgeObj)
+
+# Dispersion specific to each tag (or gene) estimation : capture of variations specific to each tag
+dgeObj <- estimateTagwiseDisp(dgeObj)
+
+# Visualisation of the Biological Coefficient of variation (BCV) 
+png("res/plotBCV.png", width = 1200,height = 800, res=120)
+plotBCV(dgeObj)  # genes with low expression (< 2 cpm) are more variable
+dev.off()
+
+```
+
+# Testing for differential expression
+
+Regression logistique : variable binaire (sepsis/nosepsis) et plusieurs prédicteurs : variables indépendante. Prédire l'apparition d'une variable binaire (sepsis/nosepsis) en fonction des prédicteurs (fonction du niveau d'expression)
+
+```{r}
+# Fit the linear model : fit a Generalized Linear regression Model (GLM) using gene expression count data 
+fit <- glmFit(dgeObj, design)
+names(fit)
+# summary(fit)
+head(coef(fit)) # estimation of the regression coefficients for the clinical group to identify the genes differentially expressed between sepsis and no sepsis
+```
+```{r}
+# Likehood ratio tests for Sepsis vs NoSepsis and show the top genes
+lrt.SepsisVsNoSepsis <- glmLRT(fit, coef=2)
+topTags(lrt.SepsisVsNoSepsis)
+```
+
+```{r}
+# Displaying results as a dataframe for the Likehood ratio tests for Sepsis vs NoSepsis
+results <- as.data.frame(topTags(lrt.SepsisVsNoSepsis,n = Inf))
+dim(results)
+```
+
+
+```{r}
+# Add the gene_name to the dataframe results
+results$c_sy <- countdata$c_sy
+dim(results)
+```
+
+```{r}
+head(results)
+```
+
+
+```{r}
+# Summary of the difference in gene expression
+summary(de <- decideTestsDGE(lrt.SepsisVsNoSepsis))
+```
+No gene was significantly expressed differently between the sepsis and Nosepsis groups
+
+```{r}
+# Visualisation of the differential gene expression
+detags <- rownames(dgeObj)[as.logical(de)]
+plotSmear(lrt.SepsisVsNoSepsis, de.tags=detags)
+```
+
+LogFC = log-fold change = measure of the variation in gene expression between the 'Sepsis' and 'NoSepsis' groups. 
+Positive logFC = overexpression in the 'Sepsis' group, negative logFC = underexpression.
+More differential expression for lowly expressed genes.
+
+# Volcano plot with FDR
+
+```{r}
+# We first create a dataframe for the creation of our volcanoplot with the difference = logFC, the significance = FDR and the GeneID
+volcano_data_FDR <- data.frame(Difference = results$logFC, Significance = -log10(results$FDR), GeneID = results$c_sy)
+head(volcano_data_FDR)
+```
+
+```{r}
+# We attribute a color for the visualisation of the volcanoplot : blue = downregulated, red = upregulated, grey = not significant
+# Significant means : -log10(FDR) > 0,5 # We know it is not a good cut-off but we just want to see the most variable genes
+volcano_data_FDR <- volcano_data_FDR %>%
+  mutate(col = ifelse(Difference < -2 & Significance > 0.5, "blue",
+                      ifelse(Difference > 2 & Significance > 0.5, "red", "grey")))
+head(volcano_data_FDR)
+```
+
+```{r}
+dim(volcano_data_FDR)
+```
+
+```{r}
+unique(volcano_data_FDR$col) # No 'blue'= No downregulated gene 
+```
+
+```{r}
+# Filter the genes "upregulated"
+volcano_data_FDR %>% filter(col == "red")  # 18 genes "upregulated" in the group sepsis / NoSepsis
+```
+
+
+```{r}
+volcano_plot_FDR <- ggplot(volcano_data_FDR, aes(x = Difference, y = Significance, color = col)) +
+  geom_point() +
+  labs(x = "logFC", y = "-log10(FDR)", title = "Volcano Plot FDR") +
+  ylim(0, max(volcano_data_FDR$Significance) * 1.2) +
+  ggrepel::geom_text_repel(
+    data = subset(volcano_data_FDR, Difference > 2 & Significance > 0.5 | Difference < -2 & Significance > 0.5),
+    aes(Difference, Significance, label = GeneID),
+    color = "black",
+    max.overlaps = 30
+  ) +  scale_color_manual(values = c("grey", "red"), labels = c("No change", "Upregulated")) +
+  geom_hline(yintercept = 0.5, lty = 3) +
+  geom_vline(xintercept = c(-2, 2), lty = 3)
+
+
+ggsave("res/volcano_plot_FDR.png", plot=volcano_plot_FDR, width = 8,height = 6, dpi=300)
+
+```
+
+
